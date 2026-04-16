@@ -193,27 +193,44 @@ async function fetchFacebookInfo(url: string): Promise<VideoInfo> {
     || html.match(/<meta[^>]+content="([^"]+)"[^>]+property="og:image"/i);
   const thumbnailUrl = thumbMatch ? decodeHtmlEntities(thumbMatch[1]) : '';
 
-  // Extract HD video URL
+  // Extract HD video URL - target actual fbcdn.net streaming URLs
   const hdPatterns = [
-    /hd_src(?:_no_ratelimit)?["\\s]*:["\\s]*"([^"]+)"/,
-    /"hd_src":"([^"]+)"/,
-    /playable_url_quality_hd\\?":"([^"]+)"/,
-    /"browser_native_hd_url":"([^"]+)"/,
+    // JSON encoded URLs inside script tags (most reliable)
+    /"hd_src_no_ratelimit"\s*:\s*"(https:\\\/\\\/video[^"]+)"/,
+    /"hd_src"\s*:\s*"(https:\\\/\\\/video[^"]+)"/,
+    /"browser_native_hd_url"\s*:\s*"(https:\\\/\\\/video[^"]+)"/,
+    // Unescaped
+    /"hd_src_no_ratelimit"\s*:\s*"(https:\/\/video[^"]+)"/,
+    /"hd_src"\s*:\s*"(https:\/\/video[^"]+)"/,
+    /playable_url_quality_hd\s*:\s*"(https:\/\/video[^"]+)"/,
   ];
 
-  // Extract SD video URL  
   const sdPatterns = [
-    /sd_src(?:_no_ratelimit)?["\\s]*:["\\s]*"([^"]+)"/,
-    /"sd_src":"([^"]+)"/,
-    /playable_url\\?":"([^"]+)"/,
-    /"browser_native_sd_url":"([^"]+)"/,
-    /"playable_url":"([^"]+)"/,
+    /"sd_src_no_ratelimit"\s*:\s*"(https:\\\/\\\/video[^"]+)"/,
+    /"sd_src"\s*:\s*"(https:\\\/\\\/video[^"]+)"/,
+    /"playable_url"\s*:\s*"(https:\\\/\\\/video[^"]+)"/,
+    /"browser_native_sd_url"\s*:\s*"(https:\\\/\\\/video[^"]+)"/,
+    // Unescaped
+    /"sd_src"\s*:\s*"(https:\/\/video[^"]+)"/,
+    /"playable_url"\s*:\s*"(https:\/\/video[^"]+)"/,
   ];
 
-  const findUrl = (patterns: RegExp[], html: string): string | null => {
+  const decodeUrl = (raw: string) =>
+    decodeHtmlEntities(raw)
+      .replace(/\\\//g, '/')
+      .replace(/\\u0026/g, '&')
+      .replace(/\\"/g, '"');
+
+  const findUrl = (patterns: RegExp[], haystack: string): string | null => {
     for (const pattern of patterns) {
-      const match = html.match(pattern);
-      if (match) return decodeHtmlEntities(match[1]).replace(/\\\//g, '/').replace(/\\u0026/g, '&');
+      const match = haystack.match(pattern);
+      if (match?.[1]) {
+        const decoded = decodeUrl(match[1]);
+        // Only accept actual video CDN URLs, not crawler/lookaside URLs
+        if (decoded.includes('fbcdn.net') || decoded.includes('fbsbx.com/public')) {
+          return decoded;
+        }
+      }
     }
     return null;
   };

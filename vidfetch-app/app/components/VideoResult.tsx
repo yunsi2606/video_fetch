@@ -47,6 +47,7 @@ export default function VideoResult({ info }: VideoResultProps) {
   );
   const [copiedUrl, setCopiedUrl] = useState(false);
   const [thumbnailError, setThumbnailError] = useState(false);
+  const [isDownloading, setIsDownloading] = useState(false);
 
   const platform = PLATFORM_CONFIG[info.platform] || PLATFORM_CONFIG.Unknown;
 
@@ -70,17 +71,25 @@ export default function VideoResult({ info }: VideoResultProps) {
   };
 
   const handleDownload = () => {
-    if (!selectedOption) return;
+    if (!selectedOption || isDownloading) return;
 
-    // For direct URLs, use anchor download
+    setIsDownloading(true);
+
+    const safeTitle = info.title.replace(/[^\wáàảãạăắằẳẵặâấầẩẫậéèẻẽẹêếềểễệíìỉĩịóòỏõọôốồổỗộơớờởỡợúùủũụưứừửữựýỳỷỹỵđ\s]/gi, '').trim();
+    const filename = `${safeTitle}_${selectedOption.quality}.${selectedOption.ext || 'mp4'}`;
+
+    // Use proxy API to force download (bypasses CORS)
+    const proxyUrl = `/api/download?url=${encodeURIComponent(selectedOption.url)}&filename=${encodeURIComponent(filename)}`;
+
     const a = document.createElement('a');
-    a.href = selectedOption.url;
-    a.download = `${info.title.replace(/[^\w\s]/gi, '').trim()}_${selectedOption.quality}.${selectedOption.ext || 'mp4'}`;
-    a.target = '_blank';
-    a.rel = 'noopener noreferrer';
+    a.href = proxyUrl;
+    a.download = filename;
     document.body.appendChild(a);
     a.click();
     document.body.removeChild(a);
+
+    // Reset after short delay
+    setTimeout(() => setIsDownloading(false), 3000);
   };
 
   const videoOptions = info.downloadOptions.filter(o => o.type === 'video');
@@ -209,11 +218,15 @@ export default function VideoResult({ info }: VideoResultProps) {
           <div className={styles.btnRow}>
             <button
               id="download-btn"
-              className={styles.downloadBtn}
+              className={`${styles.downloadBtn} ${isDownloading ? styles.downloading : ''}`}
               onClick={handleDownload}
+              disabled={isDownloading}
             >
-              <span>⬇</span>
-              Tải xuống
+              {isDownloading ? (
+                <><span className={styles.dlSpinner} /> Đang tải...</>
+              ) : (
+                <><span>⬇</span> Tải xuống</>
+              )}
             </button>
             <button
               id="copy-link-btn"

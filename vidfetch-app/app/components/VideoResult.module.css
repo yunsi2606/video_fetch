@@ -312,6 +312,25 @@
   transform: translateY(0);
 }
 
+.downloadBtn:disabled,
+.downloadBtn.downloading {
+  opacity: 0.75;
+  cursor: not-allowed;
+  transform: none;
+  box-shadow: none;
+}
+
+.dlSpinner {
+  display: inline-block;
+  width: 16px;
+  height: 16px;
+  border: 2px solid rgba(255,255,255,0.35);
+  border-top-color: white;
+  border-radius: 50%;
+  animation: spin 0.75s linear infinite;
+  flex-shrink: 0;
+}
+
 .copyBtn {
   flex: 1;
   min-width: 140px;
