@@ -78,7 +78,9 @@ export default function VideoResult({ info }: VideoResultProps) {
     const safeTitle = info.title.replace(/[^\wáàảãạăắằẳẵặâấầẩẫậéèẻẽẹêếềểễệíìỉĩịóòỏõọôốồổỗộơớờởỡợúùủũụưứừửữựýỳỷỹỵđ\s]/gi, '').trim();
     const filename = `${safeTitle}_${selectedOption.quality}.${selectedOption.ext || 'mp4'}`;
 
-    // Use proxy API to force download (bypasses CORS)
+    // Always go through /api/download proxy — ensures Content-Disposition:attachment header
+    // is set from our same origin, which is required for mobile browsers to trigger download
+    // instead of trying to open/stream the file inline.
     const proxyUrl = `/api/download?url=${encodeURIComponent(selectedOption.url)}&filename=${encodeURIComponent(filename)}`;
 
     const a = document.createElement('a');
