@@ -7,6 +7,7 @@ function detectPlatform(url: string): 'YouTube' | 'TikTok' | 'Facebook' | 'Shope
   if (/tiktok\.com/i.test(url)) return 'TikTok';
   if (/facebook\.com|fb\.watch|fb\.me/i.test(url)) return 'Facebook';
   if (/shopee\.(vn|com|co\.id|sg|ph|com\.my|co\.th)/i.test(url)) return 'Shopee';
+  if (/shp\.ee/i.test(url)) return 'Shopee';
   return 'Unknown';
 }
 
@@ -232,7 +233,7 @@ async function fetchFacebookInfo(rawUrl: string): Promise<VideoInfo> {
       if (cobalt.status === 'tunnel' || cobalt.status === 'redirect') {
         downloadOptions.push({ quality: 'HD', label: 'HD Video', url: cobalt.url as string, type: 'video', ext: 'mp4' });
       } else if (cobalt.status === 'picker' && Array.isArray(cobalt.picker)) {
-        (cobalt.picker as Array<{url: string; type?: string}>).forEach((item, i) => {
+        (cobalt.picker as Array<{ url: string; type?: string }>).forEach((item, i) => {
           downloadOptions.push({
             quality: i === 0 ? 'HD' : 'SD',
             label: i === 0 ? 'HD Video' : 'SD Video',
@@ -275,7 +276,7 @@ async function fetchFacebookInfo(rawUrl: string): Promise<VideoInfo> {
   for (const fetchUrl of [url, url.replace('www.facebook.com', 'm.facebook.com')]) {
     const res = await fetch(fetchUrl, {
       headers: {
-        'User-Agent': fetchUrl.includes('m.facebook') 
+        'User-Agent': fetchUrl.includes('m.facebook')
           ? 'Mozilla/5.0 (Linux; Android 12; Pixel 6) AppleWebKit/537.36 Chrome/122.0.0.0 Mobile Safari/537.36'
           : BROWSER_UA,
         'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
@@ -341,9 +342,106 @@ async function fetchFacebookInfo(rawUrl: string): Promise<VideoInfo> {
   return { title, thumbnailUrl, platform: 'Facebook', downloadOptions, originalUrl: rawUrl };
 }
 
+// Shopee Video Feed Handler (sv.shopee.vn/share-video/...)
+// Data lives in __NEXT_DATA__: props.pageProps.mediaInfo.video.*
+async function fetchShopeeVideoFeedInfo(url: string, originalUrl: string): Promise<VideoInfo> {
+  // Fetch with Googlebot UA — sv.shopee.vn returns SSR data for crawlers
+  const res = await fetch(url, {
+    headers: {
+      'User-Agent': 'Googlebot/2.1 (+http://www.google.com/bot.html)',
+      'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+      'Accept-Language': 'vi-VN,vi;q=0.9,en-US;q=0.8',
+      'Referer': 'https://shopee.vn/',
+    },
+    next: { revalidate: 0 },
+  });
+
+  if (!res.ok) throw new Error(`Shopee Video fetch error: ${res.status}`);
+  const html = await res.text();
+
+  // Extract __NEXT_DATA__ — Shopee Video (sv.shopee.vn) is a Next.js SSR app
+  const nextDataMatch = html.match(/<script id="__NEXT_DATA__" type="application\/json">([\s\S]*?)<\/script>/);
+  if (!nextDataMatch) {
+    throw new Error('Không tìm thấy dữ liệu video Shopee trong trang');
+  }
+
+  let pageProps: Record<string, unknown>;
+  try {
+    const nextData = JSON.parse(nextDataMatch[1]);
+    pageProps = (nextData?.props?.pageProps ?? {}) as Record<string, unknown>;
+  } catch {
+    throw new Error('Lỗi parse dữ liệu Shopee Video');
+  }
+
+  // Known path: props.pageProps.mediaInfo.video
+  const mediaInfo = pageProps.mediaInfo as Record<string, unknown> | undefined;
+  const videoData = mediaInfo?.video as Record<string, unknown> | undefined;
+  const userInfo = mediaInfo?.userInfo as Record<string, unknown> | undefined;
+
+  if (!videoData) {
+    throw new Error('Không tìm thấy thông tin video trong dữ liệu Shopee');
+  }
+
+  const videoUrl = videoData.watermarkVideoUrl as string | undefined;
+  const caption = videoData.caption as string | undefined;
+  const coverUrl = videoData.watermarkCoverUrl as string | undefined;
+  const userName = (userInfo?.videoUserName as string | undefined) || 'Shopee Video';
+
+  if (!videoUrl) {
+    throw new Error('Không tìm thấy URL video Shopee');
+  }
+
+  const title = caption
+    ? caption.replace(/#\w+/g, '').trim() || userName
+    : userName;
+
+  const thumbnailUrl = coverUrl?.startsWith('http')
+    ? coverUrl
+    : coverUrl ? `https://mms.img.susercontent.com/${coverUrl}` : '';
+
+  return {
+    title: decodeHtmlEntities(title),
+    thumbnailUrl,
+    platform: 'Shopee',
+    author: userName,
+    downloadOptions: [{
+      quality: 'HD',
+      label: 'HD Video',
+      url: videoUrl,
+      type: 'video',
+      ext: 'mp4',
+    }],
+    originalUrl,
+  };
+}
+
 // Shopee Handler
 
-async function fetchShopeeInfo(url: string): Promise<VideoInfo> {
+async function fetchShopeeInfo(rawUrl: string): Promise<VideoInfo> {
+  // Expand short links (shp.ee, vn.shp.ee) → full shopee.vn URL
+  let url = rawUrl;
+  if (/shp\.ee/i.test(rawUrl)) {
+    try {
+      const res = await fetch(rawUrl, {
+        method: 'HEAD',
+        headers: {
+          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+        },
+        redirect: 'follow',
+        next: { revalidate: 0 },
+      });
+      url = res.url;
+      console.log('[shopee] expanded short link to:', url);
+    } catch (e) {
+      console.log('[shopee] short link expansion failed:', e);
+    }
+  }
+
+  // Dispatch: sv.shopee.vn is Shopee Video social (different from product video)
+  if (/sv\.shopee\.(vn|com|sg|ph|co\.id|com\.my|co\.th)/i.test(url)) {
+    return fetchShopeeVideoFeedInfo(url, rawUrl);
+  }
+
   // Parse product/item ID from Shopee URL
   // Shopee URLs format: shopee.vn/product-name-i.{shopId}.{itemId}
   const itemMatch = url.match(/i\.(\d+)\.(\d+)/);
