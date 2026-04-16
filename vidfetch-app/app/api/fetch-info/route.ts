@@ -48,20 +48,20 @@ async function fetchYouTubeInfo(url: string): Promise<VideoInfo> {
     });
   }
 
-  // Audio-only (mp3/m4a)
+  // Audio-only
   const audioFormats = ytdl.default.filterFormats(info.formats, 'audioonly');
   const bestAudio = audioFormats
-    .filter(f => f.container === 'm4a' || f.container === 'webm')
+    .filter(f => f.container === 'mp4' || f.container === 'webm')
     .sort((a, b) => (b.audioBitrate || 0) - (a.audioBitrate || 0))[0];
 
   if (bestAudio) {
     downloadOptions.push({
       quality: 'Audio',
-      label: `MP3 Audio Only (${bestAudio.audioBitrate || '?'}kbps)`,
+      label: `Audio Only (${bestAudio.audioBitrate || '?'}kbps)`,
       url: bestAudio.url,
       type: 'audio',
       filesize: bestAudio.contentLength ? parseInt(bestAudio.contentLength) : undefined,
-      ext: 'm4a',
+      ext: 'mp4',
     });
   }
 
