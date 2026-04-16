@@ -164,138 +164,181 @@ async function fetchTikTokInfo(url: string, includeWatermark: boolean = false): 
   };
 }
 
-// Facebook Handler
-async function fetchFacebookInfo(url: string): Promise<VideoInfo> {
-  // Use real browser UA — facebookexternalhit gets a stripped/redirect version
-  const response = await fetch(url, {
-    headers: {
-      'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
-      'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
-      'Accept-Language': 'en-US,en;q=0.9',
-      'Sec-Fetch-Mode': 'navigate',
-      'Sec-Fetch-Dest': 'document',
-      'Upgrade-Insecure-Requests': '1',
-    },
-    redirect: 'follow',
-    next: { revalidate: 0 },
-  });
+// Facebook Handler — uses Cobalt API (handles anti-bot) + HTML fallback
+async function fetchFacebookInfo(rawUrl: string): Promise<VideoInfo> {
+  let url = rawUrl;
 
-  if (!response.ok) {
-    throw new Error(`Facebook fetch error: ${response.status}. Video có thể là private.`);
+  // Case 1: reel/NUMERIC_ID → watch?v=NUMERIC_ID (numeric = actual video ID)
+  const reelNumericMatch = rawUrl.match(/facebook\.com\/reel\/(\d{8,})/i);
+  if (reelNumericMatch) {
+    url = `https://www.facebook.com/watch?v=${reelNumericMatch[1]}`;
   }
 
-  const html = await response.text();
+  // Case 2: share/r/CODE or share/v/CODE → parse HTML to get og:url with real video ID
+  // Facebook doesn't do HTTP redirects — they redirect via JavaScript.
+  // But the rendered HTML always includes <meta property="og:url"> with the canonical reel/video URL.
+  const isShareLink = /facebook\.com\/share\/[rv]\/[^/?#]+/i.test(rawUrl);
+  if (isShareLink) {
+    try {
+      const shareRes = await fetch(rawUrl, {
+        headers: {
+          'User-Agent': 'facebookexternalhit/1.1 (+http://www.facebook.com/externalhit_uatext.php)',
+          'Accept': 'text/html',
+          'Accept-Language': 'en-US,en;q=0.9',
+        },
+        next: { revalidate: 0 },
+      });
 
-  // Extract title
+      if (shareRes.ok) {
+        const shareHtml = await shareRes.text();
+        // og:url contains the canonical reel/video URL
+        const ogUrl = shareHtml.match(/property="og:url"\s+content="([^"]+)"/i)?.[1]
+          || shareHtml.match(/content="([^"]+)"\s+property="og:url"/i)?.[1];
+        console.log('[facebook] og:url from share page:', ogUrl);
+
+        const reelId = ogUrl?.match(/reel\/(\d{8,})/i)?.[1]
+          || ogUrl?.match(/watch\?v=(\d{8,})/i)?.[1]
+          || ogUrl?.match(/\/videos\/(\d{8,})/i)?.[1];
+
+        if (reelId) {
+          url = `https://www.facebook.com/watch?v=${reelId}`;
+          console.log('[facebook] extracted watch URL:', url);
+        }
+      }
+    } catch (e) {
+      console.log('[facebook] share HTML parse failed:', e);
+    }
+  }
+
+  // ── Step 1: Cobalt API — try resolved URL then original share URL ────────────
+  const cobaltUrls = url !== rawUrl ? [url, rawUrl] : [url];
+  for (const cobaltTarget of cobaltUrls) {
+    try {
+      const cobaltRes = await fetch('https://api.cobalt.tools/', {
+        method: 'POST',
+        headers: { 'Accept': 'application/json', 'Content-Type': 'application/json' },
+        body: JSON.stringify({ url: cobaltTarget }),
+        next: { revalidate: 0 },
+      });
+
+      if (!cobaltRes.ok) { console.log('[facebook] Cobalt HTTP error:', cobaltRes.status, 'for', cobaltTarget); continue; }
+
+      const cobalt = await cobaltRes.json();
+      console.log('[facebook] Cobalt status:', cobalt.status, 'for', cobaltTarget);
+
+      if (cobalt.status === 'error' || cobalt.status === 'rate-limit') continue;
+
+      const downloadOptions: DownloadOption[] = [];
+      if (cobalt.status === 'tunnel' || cobalt.status === 'redirect') {
+        downloadOptions.push({ quality: 'HD', label: 'HD Video', url: cobalt.url as string, type: 'video', ext: 'mp4' });
+      } else if (cobalt.status === 'picker' && Array.isArray(cobalt.picker)) {
+        (cobalt.picker as Array<{url: string; type?: string}>).forEach((item, i) => {
+          downloadOptions.push({
+            quality: i === 0 ? 'HD' : 'SD',
+            label: i === 0 ? 'HD Video' : 'SD Video',
+            url: item.url,
+            type: item.type === 'audio' ? 'audio' : 'video',
+            ext: 'mp4',
+          });
+        });
+      }
+
+      if (downloadOptions.length > 0) {
+        let title = 'Facebook Video';
+        let thumbnailUrl = '';
+        try {
+          const metaRes = await fetch(url, {
+            headers: { 'User-Agent': 'facebookexternalhit/1.1 (+http://www.facebook.com/externalhit_uatext.php)' },
+            next: { revalidate: 0 },
+          });
+          if (metaRes.ok) {
+            const html = await metaRes.text();
+            const t = html.match(/property="og:title"\s+content="([^"]+)"/i) || html.match(/content="([^"]+)"\s+property="og:title"/i);
+            const th = html.match(/property="og:image"\s+content="([^"]+)"/i) || html.match(/content="([^"]+)"\s+property="og:image"/i);
+            if (t?.[1]) title = decodeHtmlEntities(t[1]);
+            if (th?.[1]) thumbnailUrl = th[1];
+          }
+        } catch { /* ignore */ }
+        return { title, thumbnailUrl, platform: 'Facebook', downloadOptions, originalUrl: rawUrl };
+      }
+    } catch (e) {
+      console.log('[facebook] Cobalt exception for', cobaltTarget, ':', e);
+    }
+  }
+
+
+  // ── Step 2: HTML scraping fallback (works for some public pages/videos) ────
+  const BROWSER_UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36';
+  let html = '';
+
+  // Try desktop then mobile
+  for (const fetchUrl of [url, url.replace('www.facebook.com', 'm.facebook.com')]) {
+    const res = await fetch(fetchUrl, {
+      headers: {
+        'User-Agent': fetchUrl.includes('m.facebook') 
+          ? 'Mozilla/5.0 (Linux; Android 12; Pixel 6) AppleWebKit/537.36 Chrome/122.0.0.0 Mobile Safari/537.36'
+          : BROWSER_UA,
+        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+        'Accept-Language': 'vi-VN,vi;q=0.9,en-US;q=0.8',
+      },
+      redirect: 'follow',
+      next: { revalidate: 0 },
+    });
+    if (res.ok) { html = await res.text(); break; }
+  }
+
+  if (!html) {
+    throw new Error(
+      'Facebook chặn hoàn toàn truy cập server-side. ' +
+      'Vui lòng thử link dạng facebook.com/watch?v=VIDEO_ID hoặc dùng link trực tiếp.'
+    );
+  }
+
   const titleMatch = html.match(/<meta[^>]+property="og:title"[^>]+content="([^"]+)"/i)
-    || html.match(/<meta[^>]+content="([^"]+)"[^>]+property="og:title"/i)
-    || html.match(/"title"\s*:\s*{\s*"text"\s*:\s*"([^"]+)"/);
-  const title = titleMatch ? decodeHtmlEntities(titleMatch[1]) : 'Facebook Video';
-
-  // Extract thumbnail
+    || html.match(/<meta[^>]+content="([^"]+)"[^>]+property="og:title"/i);
   const thumbMatch = html.match(/<meta[^>]+property="og:image"[^>]+content="([^"]+)"/i)
     || html.match(/<meta[^>]+content="([^"]+)"[^>]+property="og:image"/i);
+  const title = titleMatch ? decodeHtmlEntities(titleMatch[1]) : 'Facebook Video';
   const thumbnailUrl = thumbMatch ? decodeHtmlEntities(thumbMatch[1]) : '';
 
-  // Helper to decode FB JSON-encoded URL
   const decodeUrl = (raw: string) =>
-    raw
-      .replace(/\\\/\//g, '//')
-      .replace(/\\\//g, '/')
-      .replace(/\\u0026/g, '&')
-      .replace(/&amp;/g, '&')
-      .replace(/\\"/g, '"')
-      .trim();
+    raw.replace(/\\\//g, '/').replace(/\\u0026/g, '&').replace(/&amp;/g, '&').trim();
 
-  // Check if a decoded URL is a real FB video CDN URL
   const isFbVideoUrl = (u: string) =>
-    (u.includes('fbcdn.net') || u.includes('facebook.com/video')) &&
-    !u.includes('lookaside') &&
-    !u.includes('external') &&
-    (u.includes('.mp4') || u.includes('video'));
+    u.includes('fbcdn.net') && !u.includes('lookaside') && (u.includes('.mp4') || u.includes('video'));
 
-  // Patterns covering both JSON-escaped (\/) and literal (/) URL separators
   const HD_PATTERNS = [
-    /"hd_src_no_ratelimit"\s*:\s*"(https?(?::\\\/\\\/|:\/\/)[^"]+)"/,
-    /"hd_src"\s*:\s*"(https?(?::\\\/\\\/|:\/\/)[^"]{10,})"/,
-    /"browser_native_hd_url"\s*:\s*"(https?(?::\\\/\\\/|:\/\/)[^"]+)"/,
-    /playable_url_quality_hd\s*:\s*"(https?(?::\\\/\\\/|:\/\/)[^"]+)"/,
+    /"hd_src_no_ratelimit"\s*:\s*"([^"]{20,})"/,
+    /"hd_src"\s*:\s*"([^"]{20,})"/,
+    /"browser_native_hd_url"\s*:\s*"([^"]{20,})"/,
+    /playable_url_quality_hd\s*:\s*"([^"]{20,})"/,
   ];
-
   const SD_PATTERNS = [
-    /"sd_src_no_ratelimit"\s*:\s*"(https?(?::\\\/\\\/|:\/\/)[^"]+)"/,
-    /"sd_src"\s*:\s*"(https?(?::\\\/\\\/|:\/\/)[^"]{10,})"/,
-    /"playable_url"\s*:\s*"(https?(?::\\\/\\\/|:\/\/)[^"]+)"/,
-    /"browser_native_sd_url"\s*:\s*"(https?(?::\\\/\\\/|:\/\/)[^"]+)"/,
+    /"sd_src_no_ratelimit"\s*:\s*"([^"]{20,})"/,
+    /"sd_src"\s*:\s*"([^"]{20,})"/,
+    /"playable_url"\s*:\s*"([^"]{20,})"/,
+    /"browser_native_sd_url"\s*:\s*"([^"]{20,})"/,
   ];
 
-  const searchInChunk = (patterns: RegExp[], chunk: string): string | null => {
+  const findInChunks = (patterns: RegExp[], haystack: string): string | null => {
     for (const p of patterns) {
-      const match = chunk.match(p);
-      if (match?.[1]) {
-        const decoded = decodeUrl(match[1]);
-        if (isFbVideoUrl(decoded)) return decoded;
-      }
+      const m = haystack.match(p);
+      if (m?.[1]) { const d = decodeUrl(m[1]); if (isFbVideoUrl(d)) return d; }
     }
     return null;
   };
 
-  let hdUrl: string | null = null;
-  let sdUrl: string | null = null;
-
-  // Step 1: Scan inside each <script> tag (most reliable — video data lives here)
-  const scriptRegex = /<script[^>]*>([\s\S]*?)<\/script>/gi;
-  let scriptMatch: RegExpExecArray | null;
-  while ((scriptMatch = scriptRegex.exec(html)) !== null) {
-    const chunk = scriptMatch[1];
-    // Skip scripts not related to video
-    if (!chunk.includes('playable_url') && !chunk.includes('hd_src') && !chunk.includes('sd_src')) continue;
-
-    if (!hdUrl) hdUrl = searchInChunk(HD_PATTERNS, chunk);
-    if (!sdUrl) sdUrl = searchInChunk(SD_PATTERNS, chunk);
-    if (hdUrl && sdUrl) break;
-  }
-
-  // Step 2: Fallback — scan entire HTML
-  if (!hdUrl) hdUrl = searchInChunk(HD_PATTERNS, html);
-  if (!sdUrl) sdUrl = searchInChunk(SD_PATTERNS, html);
-
+  const hdUrl = findInChunks(HD_PATTERNS, html);
+  const sdUrl = findInChunks(SD_PATTERNS, html);
   const downloadOptions: DownloadOption[] = [];
-
-  if (hdUrl) {
-    downloadOptions.push({
-      quality: '720p',
-      label: '720p HD',
-      url: hdUrl,
-      type: 'video',
-      ext: 'mp4',
-    });
-  }
-
-  if (sdUrl) {
-    downloadOptions.push({
-      quality: '360p',
-      label: '360p SD',
-      url: sdUrl,
-      type: 'video',
-      ext: 'mp4',
-    });
-  }
+  if (hdUrl) downloadOptions.push({ quality: '720p', label: '720p HD', url: hdUrl, type: 'video', ext: 'mp4' });
+  if (sdUrl) downloadOptions.push({ quality: '360p', label: '360p SD', url: sdUrl, type: 'video', ext: 'mp4' });
 
   if (downloadOptions.length === 0) {
-    throw new Error(
-      'Không thể trích xuất link video. Facebook hạn chế truy cập server-side. ' +
-      'Thử dùng link trực tiếp dạng facebook.com/watch?v=ID hoặc video có thể là private.'
-    );
+    throw new Error('Không thể trích xuất link video Facebook. Vui lòng thử link watch?v=ID hoặc reel/ID trực tiếp.');
   }
 
-  return {
-    title,
-    thumbnailUrl,
-    platform: 'Facebook',
-    downloadOptions,
-    originalUrl: url,
-  };
+  return { title, thumbnailUrl, platform: 'Facebook', downloadOptions, originalUrl: rawUrl };
 }
 
 // Shopee Handler
