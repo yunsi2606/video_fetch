@@ -150,7 +150,7 @@ export default function UrlInput({ onSubmit, isLoading }: UrlInputProps) {
       {/* Supported platforms */}
       <div className={styles.platforms}>
         {Object.entries(PLATFORM_ICONS).map(([key, val]) => (
-          <span key={key} className={styles.platformTag} style={{ '--platform-color': val.color } as any}>
+          <span key={key} className={styles.platformTag} style={{ '--platform-color': val.color } as React.CSSProperties}>
             <span>{val.icon}</span>
             {val.label}
           </span>

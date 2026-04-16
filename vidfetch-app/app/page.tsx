@@ -31,8 +31,8 @@ export default function Home() {
       }
 
       setVideoInfo(data as VideoInfo);
-    } catch (err: any) {
-      setError(err.message || 'Đã xảy ra lỗi không mong muốn');
+    } catch (err: unknown) {
+      setError(err instanceof Error ? err.message : 'Đã xảy ra lỗi không mong muốn');
     } finally {
       setIsLoading(false);
     }

@@ -67,7 +67,7 @@ async function fetchYouTubeInfo(url: string): Promise<VideoInfo> {
 
   // Get best thumbnail
   const thumbnails = videoDetails.thumbnails;
-  const bestThumb = thumbnails.sort((a: any, b: any) => (b.width || 0) - (a.width || 0))[0];
+  const bestThumb = thumbnails.sort((a: { width?: number }, b: { width?: number }) => (b.width || 0) - (a.width || 0))[0];
 
   return {
     title: videoDetails.title,
@@ -80,7 +80,7 @@ async function fetchYouTubeInfo(url: string): Promise<VideoInfo> {
   };
 }
 
-// ─── TikTok Handler ───────────────────────────────────────────────────────────
+// TikTok Handler 
 async function fetchTikTokInfo(url: string, includeWatermark: boolean = false): Promise<VideoInfo> {
   // Use tikwm.com public API - reliable and free
   const apiUrl = `https://www.tikwm.com/api/?url=${encodeURIComponent(url)}&hd=1`;
@@ -164,7 +164,7 @@ async function fetchTikTokInfo(url: string, includeWatermark: boolean = false): 
   };
 }
 
-// ─── Facebook Handler ─────────────────────────────────────────────────────────
+// Facebook Handler
 async function fetchFacebookInfo(url: string): Promise<VideoInfo> {
   // Fetch the page HTML and extract video URLs from OG tags / JSON-LD
   const response = await fetch(url, {
@@ -254,7 +254,7 @@ async function fetchFacebookInfo(url: string): Promise<VideoInfo> {
   };
 }
 
-// ─── Shopee Handler ───────────────────────────────────────────────────────────
+// Shopee Handler
 async function fetchShopeeInfo(url: string): Promise<VideoInfo> {
   // Parse product/item ID from Shopee URL
   // Shopee URLs format: shopee.vn/product-name-i.{shopId}.{itemId}
@@ -343,7 +343,7 @@ async function fetchShopeeInfo(url: string): Promise<VideoInfo> {
   };
 }
 
-// ─── Utility ──────────────────────────────────────────────────────────────────
+// Utility
 function decodeHtmlEntities(str: string): string {
   return str
     .replace(/&amp;/g, '&')
@@ -355,7 +355,7 @@ function decodeHtmlEntities(str: string): string {
     .replace(/\\t/g, '');
 }
 
-// ─── Main Route Handler ───────────────────────────────────────────────────────
+// Main Route Handler
 export async function POST(request: NextRequest) {
   try {
     const body: FetchInfoRequest = await request.json();
@@ -391,10 +391,11 @@ export async function POST(request: NextRequest) {
     }
 
     return NextResponse.json(videoInfo);
-  } catch (error: any) {
+  } catch (error: unknown) {
     console.error('[fetch-info] Error:', error);
+    const message = error instanceof Error ? error.message : 'Đã xảy ra lỗi khi lấy thông tin video';
     return NextResponse.json(
-      { message: error.message || 'Đã xảy ra lỗi khi lấy thông tin video' },
+      { message },
       { status: 500 }
     );
   }

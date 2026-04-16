@@ -20,7 +20,7 @@ const nextConfig: NextConfig = {
 
   // Required for @distube/ytdl-core in serverless (Next 16+)
   serverExternalPackages: ['@distube/ytdl-core'],
-  
+
   turbopack: {},
 };
 
