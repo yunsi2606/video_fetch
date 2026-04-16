@@ -166,77 +166,101 @@ async function fetchTikTokInfo(url: string, includeWatermark: boolean = false): 
 
 // Facebook Handler
 async function fetchFacebookInfo(url: string): Promise<VideoInfo> {
-  // Fetch the page HTML and extract video URLs from OG tags / JSON-LD
+  // Use real browser UA — facebookexternalhit gets a stripped/redirect version
   const response = await fetch(url, {
     headers: {
-      'User-Agent': 'facebookexternalhit/1.1 (+http://www.facebook.com/externalhit_uatext.php)',
+      'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
+      'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
       'Accept-Language': 'en-US,en;q=0.9',
-      'Accept': 'text/html,application/xhtml+xml',
+      'Sec-Fetch-Mode': 'navigate',
+      'Sec-Fetch-Dest': 'document',
+      'Upgrade-Insecure-Requests': '1',
     },
+    redirect: 'follow',
     next: { revalidate: 0 },
   });
 
   if (!response.ok) {
-    throw new Error(`Facebook fetch error: ${response.status}. Có thể video là private.`);
+    throw new Error(`Facebook fetch error: ${response.status}. Video có thể là private.`);
   }
 
   const html = await response.text();
-  const downloadOptions: DownloadOption[] = [];
 
-  // Extract title from OG tags
+  // Extract title
   const titleMatch = html.match(/<meta[^>]+property="og:title"[^>]+content="([^"]+)"/i)
-    || html.match(/<meta[^>]+content="([^"]+)"[^>]+property="og:title"/i);
+    || html.match(/<meta[^>]+content="([^"]+)"[^>]+property="og:title"/i)
+    || html.match(/"title"\s*:\s*{\s*"text"\s*:\s*"([^"]+)"/);
   const title = titleMatch ? decodeHtmlEntities(titleMatch[1]) : 'Facebook Video';
 
-  // Extract thumbnail from OG tags
+  // Extract thumbnail
   const thumbMatch = html.match(/<meta[^>]+property="og:image"[^>]+content="([^"]+)"/i)
     || html.match(/<meta[^>]+content="([^"]+)"[^>]+property="og:image"/i);
   const thumbnailUrl = thumbMatch ? decodeHtmlEntities(thumbMatch[1]) : '';
 
-  // Extract HD video URL - target actual fbcdn.net streaming URLs
-  const hdPatterns = [
-    // JSON encoded URLs inside script tags (most reliable)
-    /"hd_src_no_ratelimit"\s*:\s*"(https:\\\/\\\/video[^"]+)"/,
-    /"hd_src"\s*:\s*"(https:\\\/\\\/video[^"]+)"/,
-    /"browser_native_hd_url"\s*:\s*"(https:\\\/\\\/video[^"]+)"/,
-    // Unescaped
-    /"hd_src_no_ratelimit"\s*:\s*"(https:\/\/video[^"]+)"/,
-    /"hd_src"\s*:\s*"(https:\/\/video[^"]+)"/,
-    /playable_url_quality_hd\s*:\s*"(https:\/\/video[^"]+)"/,
-  ];
-
-  const sdPatterns = [
-    /"sd_src_no_ratelimit"\s*:\s*"(https:\\\/\\\/video[^"]+)"/,
-    /"sd_src"\s*:\s*"(https:\\\/\\\/video[^"]+)"/,
-    /"playable_url"\s*:\s*"(https:\\\/\\\/video[^"]+)"/,
-    /"browser_native_sd_url"\s*:\s*"(https:\\\/\\\/video[^"]+)"/,
-    // Unescaped
-    /"sd_src"\s*:\s*"(https:\/\/video[^"]+)"/,
-    /"playable_url"\s*:\s*"(https:\/\/video[^"]+)"/,
-  ];
-
+  // Helper to decode FB JSON-encoded URL
   const decodeUrl = (raw: string) =>
-    decodeHtmlEntities(raw)
+    raw
+      .replace(/\\\/\//g, '//')
       .replace(/\\\//g, '/')
       .replace(/\\u0026/g, '&')
-      .replace(/\\"/g, '"');
+      .replace(/&amp;/g, '&')
+      .replace(/\\"/g, '"')
+      .trim();
 
-  const findUrl = (patterns: RegExp[], haystack: string): string | null => {
-    for (const pattern of patterns) {
-      const match = haystack.match(pattern);
+  // Check if a decoded URL is a real FB video CDN URL
+  const isFbVideoUrl = (u: string) =>
+    (u.includes('fbcdn.net') || u.includes('facebook.com/video')) &&
+    !u.includes('lookaside') &&
+    !u.includes('external') &&
+    (u.includes('.mp4') || u.includes('video'));
+
+  // Patterns covering both JSON-escaped (\/) and literal (/) URL separators
+  const HD_PATTERNS = [
+    /"hd_src_no_ratelimit"\s*:\s*"(https?(?::\\\/\\\/|:\/\/)[^"]+)"/,
+    /"hd_src"\s*:\s*"(https?(?::\\\/\\\/|:\/\/)[^"]{10,})"/,
+    /"browser_native_hd_url"\s*:\s*"(https?(?::\\\/\\\/|:\/\/)[^"]+)"/,
+    /playable_url_quality_hd\s*:\s*"(https?(?::\\\/\\\/|:\/\/)[^"]+)"/,
+  ];
+
+  const SD_PATTERNS = [
+    /"sd_src_no_ratelimit"\s*:\s*"(https?(?::\\\/\\\/|:\/\/)[^"]+)"/,
+    /"sd_src"\s*:\s*"(https?(?::\\\/\\\/|:\/\/)[^"]{10,})"/,
+    /"playable_url"\s*:\s*"(https?(?::\\\/\\\/|:\/\/)[^"]+)"/,
+    /"browser_native_sd_url"\s*:\s*"(https?(?::\\\/\\\/|:\/\/)[^"]+)"/,
+  ];
+
+  const searchInChunk = (patterns: RegExp[], chunk: string): string | null => {
+    for (const p of patterns) {
+      const match = chunk.match(p);
       if (match?.[1]) {
         const decoded = decodeUrl(match[1]);
-        // Only accept actual video CDN URLs, not crawler/lookaside URLs
-        if (decoded.includes('fbcdn.net') || decoded.includes('fbsbx.com/public')) {
-          return decoded;
-        }
+        if (isFbVideoUrl(decoded)) return decoded;
       }
     }
     return null;
   };
 
-  const hdUrl = findUrl(hdPatterns, html);
-  const sdUrl = findUrl(sdPatterns, html);
+  let hdUrl: string | null = null;
+  let sdUrl: string | null = null;
+
+  // Step 1: Scan inside each <script> tag (most reliable — video data lives here)
+  const scriptRegex = /<script[^>]*>([\s\S]*?)<\/script>/gi;
+  let scriptMatch: RegExpExecArray | null;
+  while ((scriptMatch = scriptRegex.exec(html)) !== null) {
+    const chunk = scriptMatch[1];
+    // Skip scripts not related to video
+    if (!chunk.includes('playable_url') && !chunk.includes('hd_src') && !chunk.includes('sd_src')) continue;
+
+    if (!hdUrl) hdUrl = searchInChunk(HD_PATTERNS, chunk);
+    if (!sdUrl) sdUrl = searchInChunk(SD_PATTERNS, chunk);
+    if (hdUrl && sdUrl) break;
+  }
+
+  // Step 2: Fallback — scan entire HTML
+  if (!hdUrl) hdUrl = searchInChunk(HD_PATTERNS, html);
+  if (!sdUrl) sdUrl = searchInChunk(SD_PATTERNS, html);
+
+  const downloadOptions: DownloadOption[] = [];
 
   if (hdUrl) {
     downloadOptions.push({
@@ -259,7 +283,10 @@ async function fetchFacebookInfo(url: string): Promise<VideoInfo> {
   }
 
   if (downloadOptions.length === 0) {
-    throw new Error('Không thể trích xuất link video. Video có thể là private hoặc cần đăng nhập.');
+    throw new Error(
+      'Không thể trích xuất link video. Facebook hạn chế truy cập server-side. ' +
+      'Thử dùng link trực tiếp dạng facebook.com/watch?v=ID hoặc video có thể là private.'
+    );
   }
 
   return {
@@ -272,6 +299,7 @@ async function fetchFacebookInfo(url: string): Promise<VideoInfo> {
 }
 
 // Shopee Handler
+
 async function fetchShopeeInfo(url: string): Promise<VideoInfo> {
   // Parse product/item ID from Shopee URL
   // Shopee URLs format: shopee.vn/product-name-i.{shopId}.{itemId}
